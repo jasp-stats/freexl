@@ -618,6 +618,12 @@ sheet_start_tag (void *data, const char *el, const char **attr)
 				type = XLSX_STR_INDEX;
 			    if (strcmp (t, "n") == 0)
 				type = XLSX_INTEGER;
+				/* handle error code as strings */
+				if (strcmp (t, "e") == 0)
+				type = XLSX_STRING; 
+				/* handle DATE as integer numbers */
+				if (strcmp (t, "d") == 0)
+				type = XLSX_INTEGER; 
 				/* 
 				 * sandro 2023-09-15
 				 * 
