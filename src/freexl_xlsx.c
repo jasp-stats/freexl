@@ -623,7 +623,7 @@ sheet_start_tag (void *data, const char *el, const char **attr)
 				type = XLSX_STRING; 
 				/* handle DATE as integer numbers */
 				if (strcmp (t, "d") == 0)
-				type = XLSX_INTEGER; 
+				type = XLSX_STRING; 
 				/* 
 				 * sandro 2023-09-15
 				 * 
