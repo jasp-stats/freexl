@@ -671,22 +671,6 @@ set_xlsx_cell_value (xlsx_worksheet * worksheet, const char *val)
     if (cell == NULL)
 	return;
 
-	/* For JASP: If a cell is marked as a date/time format, it will be force to a string. */
-    if (cell->is_datetime != XLSX_DATE_NONE)
-      {
-          /* Force to string */
-          cell->type = XLSX_STRING;
-          int len = strlen(val);
-          cell->text = malloc(len + 1);
-          if (cell->text != NULL)
-            {
-                strcpy(cell->text, val);
-                cell->assigned = 1;
-            }
-          return;
-      }
-	/* End For JASP */
-
     if (cell->type == XLSX_NULL && val != NULL)
       {
 	  /* it could be an Integer or Double */
