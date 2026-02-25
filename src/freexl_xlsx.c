@@ -644,7 +644,7 @@ sheet_start_tag (void *data, const char *el, const char **attr)
 	  else
 	      worksheet->error = 1;
       }
-    if (strcmp (el, "v") == 0)
+    if (strcmp (el, "v") == 0 || strcmp (el, "t") == 0)
       {
 	  if (worksheet->ColOk == 1)
 	      worksheet->CellValueOk = 1;
@@ -751,7 +751,7 @@ sheet_end_tag (void *data, const char *el)
 	  else
 	      worksheet->error = 1;
       }
-    if (strcmp (el, "v") == 0)
+    if (strcmp (el, "v") == 0 || strcmp (el, "t") == 0)
       {
 	  if (worksheet->CellValueOk == 1)
 	    {
@@ -834,8 +834,26 @@ do_fetch_worksheet (unzFile uf, xlsx_worksheet * worksheet)
 	   * we'll read from the Target indirectly referenced
 	   * through _rels/workbook.xml.rels 
 	   */
-	  zip_entry = malloc (strlen (worksheet->target) + 5);
-	  sprintf (zip_entry, "xl/%s", worksheet->target);
+
+		/* 2026-2-25 shun wang from JASP */
+	    const char *raw_target = worksheet->target;
+
+        // if path start with '/' then skip to handle /xl/... case)
+        if (raw_target[0] == '/')
+		{
+            raw_target++;
+		}
+        // check if target has including "xl/"
+        if (strncmp(raw_target, "xl/", 3) == 0) 
+        {
+            zip_entry = malloc (strlen (raw_target) + 1);
+            strcpy (zip_entry, raw_target);
+        }
+        else 
+        {
+            zip_entry = malloc (strlen (raw_target) + 4);
+            sprintf (zip_entry, "xl/%s", raw_target);
+        }
       }
     else
       {
