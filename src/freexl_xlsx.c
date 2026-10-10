@@ -474,7 +474,8 @@ find_col_no (const char *sym)
 // }
 
 static void
-add_xlsx_col (xlsx_worksheet * worksheet, int col_no, int type, int is_datetime)
+add_xlsx_col (xlsx_worksheet * worksheet, int col_no, int type, int is_datetime,
+	      int msec_digits)
 {
 /* adding a cell to a Worksheet row */
     xlsx_row *row;
@@ -491,6 +492,7 @@ add_xlsx_col (xlsx_worksheet * worksheet, int col_no, int type, int is_datetime)
     cell->col_no = col_no;
     cell->type = type;
     cell->is_datetime = is_datetime;
+    cell->msec_digits = msec_digits;
     cell->text = NULL;
     cell->assigned = 0;
     cell->next = NULL;
@@ -512,15 +514,27 @@ xlsx_is_datetime (xlsx_workbook * workbook, int style)
 {
 /* checking for a DATETIME cell value */
     int is_datetime = 0;
-	/* JASP: disable datatime detection for now
     if (style >= 0 && style < workbook->n_styles)
       {
 	  xlsx_style *stl = workbook->styles + style;
 	  if (stl->formatRef != NULL)
 	      is_datetime = stl->formatRef->is_datetime;
       }
-	*/
     return is_datetime;
+}
+
+static int
+xlsx_msec_digits (xlsx_workbook * workbook, int style)
+{
+/* checking for sub-second digits required by a cell format */
+    int msec_digits = 0;
+    if (style >= 0 && style < workbook->n_styles)
+      {
+	  xlsx_style *stl = workbook->styles + style;
+	  if (stl->formatRef != NULL)
+	      msec_digits = stl->formatRef->msec_digits;
+      }
+    return msec_digits;
 }
 
 static void
@@ -600,11 +614,15 @@ sheet_start_tag (void *data, const char *el, const char **attr)
 		  }
 		if (r != NULL)
 		    col_no = find_col_no (r);
-		if (col_no >= 0)
-		  {
-		      int is_datetime = XLSX_DATE_NONE;
-		      if (s >= 0)
-			  is_datetime = xlsx_is_datetime (worksheet->wbRef, s);
+	if (col_no >= 0)
+	  {
+	      int is_datetime = XLSX_DATE_NONE;
+	      int msec_digits = 0;
+	      if (s >= 0)
+		{
+		    is_datetime = xlsx_is_datetime (worksheet->wbRef, s);
+		    msec_digits = xlsx_msec_digits (worksheet->wbRef, s);
+		}
 		      if (t != NULL)
 			{
 			    /*
@@ -639,8 +657,8 @@ sheet_start_tag (void *data, const char *el, const char **attr)
 				type = XLSX_STRING;
 				/* end sandro 2023-09-15 */
 			}
-		      add_xlsx_col (worksheet, col_no, type, is_datetime);
-		      worksheet->ColOk = 1;
+	      add_xlsx_col (worksheet, col_no, type, is_datetime, msec_digits);
+	      worksheet->ColOk = 1;
 		  }
 	    }
 	  else
@@ -1294,20 +1312,138 @@ do_fetch_xlsx_shared_strings (unzFile uf, xlsx_workbook * workbook)
 }
 
 static int
-parse_xlsx_format (const char *code)
+parse_xlsx_format (const char *code, int *msec_digits)
 {
 /* parsing a XLSX format string */
     int is_date = 0;
     int is_time = 0;
     int i;
     int len = strlen (code);
+    int in_brackets = 0;
+    int am_pm = 0;
+    *msec_digits = 0;
     for (i = 0; i < len; i++)
       {
-	  if (code[i] == 'd' || code[i] == 'm' || code[i] == 'y')
+	  if (code[i] == '[')
+	    {
+		/* bracketed sections: colors, conditions, locales e.g. [Red] [>=10] [$-409] */
+		in_brackets = 1;
+		continue;
+	    }
+	  if (code[i] == ']')
+	    {
+		in_brackets = 0;
+		continue;
+	    }
+	  if (in_brackets)
+	      continue;
+	  if (code[i] == '"')
+	    {
+		/* quoted literal text: skip until the closing quote */
+		i++;
+		while (i < len && code[i] != '"')
+		    i++;
+		continue;
+	    }
+	  if (code[i] == '\\')
+	    {
+		/* escaped literal character */
+		i++;
+		continue;
+	    }
+	  /* AM/PM indicator: forces a time interpretation */
+	  if ((code[i] == 'A' || code[i] == 'a')
+	      && i + 4 < len
+	      && (code[i + 1] == 'M' || code[i + 1] == 'm')
+	      && (code[i + 2] == '/' || code[i + 3] == '/'))
+	    {
+		am_pm = 1;
+		is_time = 1;
+		/* skip the AM/PM token itself */
+		if (code[i + 2] == '/')
+		    i += 4;
+		else
+		    i += 5;
+		continue;
+	    }
+	  if (code[i] == 'd' || code[i] == 'y')
 	      is_date = 1;
 	  if (code[i] == 'h' || code[i] == 's')
-	      is_time = 1;
+	    {
+		is_time = 1;
+		/* sub-second digits: e.g. ss.000 or ss.### */
+		if (code[i] == 's' || code[i] == 'S')
+		  {
+		      int j = i + 1;
+		      while (j + 1 < len
+			     && (code[j] == 's' || code[j] == 'S'))
+			  j++;
+		      if (j < len && (code[j] == '.' || code[j] == ','))
+			{
+			    int digits = 0;
+			    j++;
+			    while (j < len && digits < 3
+				   && (code[j] == '0' || code[j] == '#'
+				       || code[j] == 's' || code[j] == 'S'))
+			      {
+				  digits++;
+				  j++;
+			      }
+			    if (digits > *msec_digits)
+				*msec_digits = digits;
+			}
+		    }
+	    }
+	  if (code[i] == 'm')
+	    {
+		/*
+		 * 'm' means minutes when the nearest preceding format-code
+		 * letter is 'h' (or when an 'h' precedes it ignoring
+		 * separators), or when a 's' follows it (ignoring
+		 * separators); otherwise it means month
+		 */
+		int j;
+		int minutes = 0;
+		for (j = i - 1; j >= 0; j--)
+		  {
+		      if (code[j] == 'h' || code[j] == 'H')
+			{
+			    minutes = 1;
+			    break;
+			}
+		      if (code[j] == 'm' || code[j] == 'M')
+			  /* same minute/month token: keep scanning backwards */
+			  continue;
+		      if (code[j] == 'd' || code[j] == 'D' || code[j] == 'y'
+			  || code[j] == 'Y' || code[j] == 's' || code[j] == 'S')
+			  break;
+		  }
+		if (!minutes)
+		  {
+		      for (j = i + 1; j < len; j++)
+			{
+			    if (code[j] == 's' || code[j] == 'S')
+			      {
+				  minutes = 1;
+				  break;
+			      }
+			    if (code[j] == 'm' || code[j] == 'M')
+				  /* same minute/month token: keep scanning forwards */
+			      continue;
+			    if (code[j] == 'd' || code[j] == 'D'
+				|| code[j] == 'y' || code[j] == 'Y'
+				|| code[j] == 'h' || code[j] == 'H')
+				break;
+			}
+		  }
+		if (minutes)
+		    is_time = 1;
+		else
+		    is_date = 1;
+	    }
       }
+    if (am_pm)
+	is_time = 1;
     if (is_date && is_time)
 	return XLSX_DATE_AND_TIME;
     if (is_date)
@@ -1316,6 +1452,12 @@ parse_xlsx_format (const char *code)
 	return XLSX_TIME_SIMPLE;
     return XLSX_DATE_NONE;
 }
+
+/* built-in XLSX number formats (used when a style references a built-in
+ * numFmtId that isn't explicitly declared within <numFmts>) */
+static xlsx_format builtin_date_format = { 0, XLSX_DATE_SIMPLE, 0 };
+static xlsx_format builtin_time_format = { 0, XLSX_TIME_SIMPLE, 0 };
+static xlsx_format builtin_datetime_format = { 0, XLSX_DATE_AND_TIME, 0 };
 
 static xlsx_format *
 find_xlsx_format (xlsx_workbook * workbook, int id)
@@ -1328,6 +1470,45 @@ find_xlsx_format (xlsx_workbook * workbook, int id)
 	  if (fmt->fmtId == id)
 	      return fmt;
       }
+/* built-in number formats (identifiers below 164 are reserved by Excel) */
+    switch (id)
+      {
+	      case 14:			/* mm-dd-yy */
+	      case 15:			/* d-mmm-yy */
+	      case 16:			/* d-mmm */
+	      case 17:			/* mmm-yy */
+	  return &builtin_date_format;
+      	  case 22:			/* m/d/yy h:mm */
+	  return &builtin_datetime_format;
+	      case 18:			/* h:mm AM/PM */
+	      case 19:			/* h:mm:ss AM/PM */
+	      case 20:			/* h:mm */
+	      case 21:			/* h:mm:ss */
+	      case 32:			/* h:mm:ss (East Asian locale) */
+	      case 33:			/* h:mm:ss (East Asian locale) */
+		  case 45:			/* mm:ss */
+	      case 46:			/* [h]:mm:ss */
+	      case 47:			/* mmss.0  (with msec. inside) */
+	  return &builtin_time_format;
+	      case 27:			/* m/d/yy (East Asian locale) */
+	      case 28:			/* m/d/yy (East Asian locale) */
+	      case 29:			/* m/d/yy (East Asian locale) */
+	      case 30:			/* m/d/yy (East Asian locale) */
+	      case 31:			/* m/d/yy (East Asian locale) */
+	      case 34:			/* yyyy-mm-dd (East Asian locale) */
+	      case 35:			/* m/d/yy (East Asian locale) */
+	      case 36:			/* m/d/yy (East Asian locale) */
+	      case 50:			/* mm:ss (CJK locale) */
+	      case 51:			/* mm:ss (CJK locale) */
+	      case 52:			/* yyyy-mm-dd (CJK locale) */
+	      case 53:			/* yyyy-mm-dd (CJK locale) */
+	      case 54:			/* yyyy-mm-dd (CJK locale) */
+	      case 55:			/* yyyy-mm-dd (CJK locale) */
+	      case 56:			/* yyyy-mm-dd (CJK locale) */
+	      case 57:			/* yyyy-mm-dd (CJK locale) */
+	      case 58:			/* yyyy-mm-dd (CJK locale) */
+	  return &builtin_date_format;
+      };
     return NULL;
 }
 
@@ -1365,12 +1546,13 @@ styles_start_tag (void *data, const char *el, const char **attr)
 		      int i;
 		      workbook->formats =
 			  malloc (sizeof (xlsx_format) * workbook->n_formats);
-		      for (i = 0; i < workbook->n_formats; i++)
-			{
-			    xlsx_format *fmt = workbook->formats + i;
-			    fmt->fmtId = -1;
-			    fmt->is_datetime = 0;
-			}
+	      for (i = 0; i < workbook->n_formats; i++)
+		  {
+		    xlsx_format *fmt = workbook->formats + i;
+		    fmt->fmtId = -1;
+		    fmt->is_datetime = 0;
+		    fmt->msec_digits = 0;
+		  }
 		  }
 		workbook->next_format = 0;
 		workbook->FormatsOk = 1;
@@ -1406,7 +1588,8 @@ styles_start_tag (void *data, const char *el, const char **attr)
 		      xlsx_format *fmt =
 			  workbook->formats + workbook->next_format;
 		      fmt->fmtId = id;
-		      fmt->is_datetime = parse_xlsx_format (code);
+		      fmt->is_datetime =
+			  parse_xlsx_format (code, &fmt->msec_digits);
 		  }
 		workbook->next_format += 1;
 	    }

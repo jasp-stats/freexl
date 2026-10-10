@@ -107,6 +107,13 @@ lround (double num)
     long integer = (long) round (num);
     return integer;
 }
+
+static long long
+llround (double num)
+{
+    long long integer = (long long) round (num);
+    return integer;
+}
 #endif
 
 static void
@@ -554,6 +561,36 @@ compute_time (int *hh, int *mm, int *ss, double percent)
     *hh = hours;
     *mm = mins;
     *ss = secs;
+}
+
+static void
+compute_time_msec (int *hh, int *mm, int *ss, int *msec, double percent)
+{
+/* computing an Excel time including sub-second milliseconds */
+    long long total_msecs;
+    int hours;
+    int mins;
+    int secs;
+    int ms;
+    double day_milliseconds = 24 * 60 * 60;
+    day_milliseconds *= 1000.0;
+    day_milliseconds *= percent;
+    total_msecs = llround (day_milliseconds);
+    ms = (int) (total_msecs % 1000);
+    if (ms < 0)
+	ms = 0;
+    if (ms > 999)
+	ms = 999;
+    total_msecs /= 1000;
+    secs = (int) total_msecs;
+    hours = secs / 3600;
+    secs -= hours * 3600;
+    mins = secs / 60;
+    secs -= mins * 60;
+    *hh = hours;
+    *mm = mins;
+    *ss = secs;
+    *msec = ms;
 }
 
 static void
@@ -5326,6 +5363,13 @@ get_cell_value_xlsx (xlsx_workbook * workbook, unsigned int row,
 				  val->value.text_value =
 				      *(workbook->strings + p_col->str_index);
 			      }
+			    else if (p_col->type == XLSX_STRING)
+			      {
+				  /* an ISO-8601 Date (t="d") or a text value
+				   * already stored as a string: returned as is */
+				  val->type = FREEXL_CELL_TEXT;
+				  val->value.text_value = p_col->text;
+			      }
 			    else
 			      {
 				  /* special case: DATE, TIME, DATETIME */
@@ -5336,6 +5380,10 @@ get_cell_value_xlsx (xlsx_workbook * workbook, unsigned int row,
 				  int hh;
 				  int mm;
 				  int ss;
+				  int msec;
+				  int msec_digits =
+				      p_col->msec_digits >
+				      0 ? p_col->msec_digits : 0;
 				  int year = 1900;
 				  int month = 1;
 				  int day = 1;
@@ -5354,7 +5402,8 @@ get_cell_value_xlsx (xlsx_workbook * workbook, unsigned int row,
 					value = 0.0;
 					count = 0;
 				    }
-				  compute_time (&hh, &mm, &ss, value);
+				  compute_time_msec (&hh, &mm, &ss, &msec,
+						     value);
 				  compute_date (&year, &month, &day, count);
 				  if (p_col->is_datetime == XLSX_DATE_SIMPLE)
 				    {
@@ -5366,15 +5415,28 @@ get_cell_value_xlsx (xlsx_workbook * workbook, unsigned int row,
 				  else if (p_col->is_datetime ==
 					   XLSX_TIME_SIMPLE)
 				    {
-					sprintf (datetime,
-						 "%02d:%02d:%02d", hh, mm, ss);
+					if (msec_digits > 0)
+					    sprintf (datetime,
+						     "%02d:%02d:%02d.%0*d", hh,
+						     mm, ss, msec_digits, msec);
+					else
+					    sprintf (datetime,
+						     "%02d:%02d:%02d", hh, mm,
+						     ss);
 					val->type = FREEXL_CELL_TIME;
 				    }
 				  else
 				    {
-					sprintf (datetime,
-						 "%04d-%02d-%02d %02d:%02d:%02d",
-						 year, month, day, hh, mm, ss);
+					if (msec_digits > 0)
+					    sprintf (datetime,
+						     "%04d-%02d-%02d %02d:%02d:%02d.%0*d",
+						     year, month, day, hh, mm,
+						     ss, msec_digits, msec);
+					else
+					    sprintf (datetime,
+						     "%04d-%02d-%02d %02d:%02d:%02d",
+						     year, month, day, hh, mm,
+						     ss);
 					val->type = FREEXL_CELL_DATETIME;
 				    }
 				  //val->value.text_value = NULL;
